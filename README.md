@@ -1,2 +1,21 @@
-# pocket-status-api
-Serverless API middleware built with Cloudflare Workers to fetch, aggregate, and format data for the PocketStatus ESP32 ambient display.
+```txt
+npm install
+npm run dev
+```
+
+```txt
+npm run deploy
+```
+
+[For generating/synchronizing types based on your Worker configuration run](https://developers.cloudflare.com/workers/wrangler/commands/#types):
+
+```txt
+npm run cf-typegen
+```
+
+Pass the `CloudflareBindings` as generics when instantiating `Hono`:
+
+```ts
+// src/index.ts
+const app = new Hono<{ Bindings: CloudflareBindings }>()
+```
