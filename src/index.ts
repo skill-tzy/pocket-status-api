@@ -10,7 +10,7 @@ app.get('/', (c) => {
 // Endpoint utama yang nanti ditembak oleh ESP32
 app.get('/api/data', async (c) => {
   try {
-    // URL API Eksternal (bisa lu tambah sampai 10 API di sini nanti)
+    // URL API Eksternal
     const indodaxUrl = 'https://indodax.com/api/ticker/btc_idr'
     const aladhanUrl = 'https://api.aladhan.com/v1/timingsByCity?city=Surakarta&country=Indonesia&method=11'
 
