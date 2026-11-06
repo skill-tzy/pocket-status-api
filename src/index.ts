@@ -76,70 +76,80 @@ app.get('/api/cuaca', async (c) => {
 })
 
 app.get('/api/finance', async (c) => {
-  // Tangkap parameter fields (contoh: ?fields=ihsg_harga,btc_idr,emas_dunia_idr)
   const fieldsParam = c.req.query('fields')
 
   try {
-    const fetchOptions = {
+    // Header ini HANYA dipakai untuk menembus Yahoo Finance
+    const yahooOptions = {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json"
       }
     }
 
-    // Tarik semua data dari sumber yang stabil secara paralel
-    const [ihsgRes, goldRes, usdRes, btcRes, ethRes] = await Promise.all([
-      fetch('https://query1.finance.yahoo.com/v8/finance/chart/^JKSE', fetchOptions),  // IHSG
-      fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', fetchOptions),   // Emas Dunia (Troy Ounce)
-      fetch('https://open.er-api.com/v6/latest/USD'),                                  // Kurs API Stabil
-      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),              // Crypto Binance (Anti-blokir)
-      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT')
+    // Fungsi fetch dengan opsi parameter dinamis
+    const fetchSafe = async (url: string, options?: RequestInit) => {
+      try {
+        const res = await fetch(url, options)
+        if (!res.ok) {
+          console.error(`Gagal hit ${url}: ${res.status}`)
+          return null
+        }
+        return await res.json()
+      } catch (e) {
+        return null
+      }
+    }
+
+    // Tarik data paralel: Yahoo pakai header, sisanya polos (natural)
+    const [ihsgData, goldData, usdData, btcRaw, ethRaw] = await Promise.all([
+      fetchSafe('https://query1.finance.yahoo.com/v8/finance/chart/^JKSE', yahooOptions), 
+      fetchSafe('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', yahooOptions),  
+      fetchSafe('https://open.er-api.com/v6/latest/USD'),                                 
+      fetchSafe('https://api.mexc.com/api/v3/ticker/24hr?symbol=BTCUSDT'), // MEXC (Anti-blokir)
+      fetchSafe('https://api.mexc.com/api/v3/ticker/24hr?symbol=ETHUSDT')  // MEXC (Anti-blokir)
     ])
 
-    // Parse JSON dengan pengamanan (fallback kalau ada 1 API yang down)
-    const ihsgData = ihsgRes.ok ? await ihsgRes.json() : null
-    const goldData = goldRes.ok ? await goldRes.json() : null
-    const usdData = usdRes.ok ? await usdRes.json() : null
-    const btcData = btcRes.ok ? await btcRes.json() : null
-    const ethData = ethRes.ok ? await ethRes.json() : null
-
-    // 1. Ekstrak Kurs USD (untuk konversi Crypto & Emas)
-    const kursUSD = usdData ? usdData.rates.IDR : 15500 
+    // 1. Ekstrak Kurs USD
+    const kursUSD = (usdData && usdData.rates && usdData.rates.IDR) ? usdData.rates.IDR : 15500 
 
     // 2. Ekstrak IHSG
     let ihsgHarga = "0", ihsgPersen = "0"
-    if (ihsgData && ihsgData.chart.result) {
+    if (ihsgData && ihsgData.chart && ihsgData.chart.result && ihsgData.chart.result[0].meta) {
       const meta = ihsgData.chart.result[0].meta
-      ihsgHarga = meta.regularMarketPrice.toFixed(0)
-      ihsgPersen = (((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100).toFixed(2)
+      ihsgHarga = meta.regularMarketPrice ? meta.regularMarketPrice.toFixed(0) : "0"
+      if (meta.regularMarketPrice && meta.previousClose) {
+        ihsgPersen = (((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100).toFixed(2)
+      }
     }
 
-    // 3. Ekstrak Emas Dunia & Konversi ke Rupiah/Gram
+    // 3. Ekstrak Emas Dunia
     let emasDuniaIdr = "0"
-    if (goldData && goldData.chart.result) {
-      const emasUSD_per_oz = goldData.chart.result[0].meta.regularMarketPrice
-      // Rumus: (Harga USD / 31.1035 gram) * Kurs Rupiah
-      emasDuniaIdr = ((emasUSD_per_oz / 31.1035) * kursUSD).toFixed(0)
+    if (goldData && goldData.chart && goldData.chart.result && goldData.chart.result[0].meta) {
+      const emasUSD = goldData.chart.result[0].meta.regularMarketPrice
+      if (emasUSD) {
+        emasDuniaIdr = ((emasUSD / 31.1035) * kursUSD).toFixed(0)
+      }
     }
 
-    // 4. Ekstrak Crypto (Binance) & Konversi ke Rupiah
+    // 4. Ekstrak Crypto (Format MEXC 100% sama dengan Binance)
     let btcIdr = "0", btcPersen = "0"
-    if (btcData) {
-      btcIdr = (parseFloat(btcData.lastPrice) * kursUSD).toFixed(0)
-      btcPersen = parseFloat(btcData.priceChangePercent).toFixed(2)
+    if (btcRaw && btcRaw.lastPrice) {
+      btcIdr = (parseFloat(btcRaw.lastPrice) * kursUSD).toFixed(0)
+      btcPersen = parseFloat(btcRaw.priceChangePercent).toFixed(2)
     }
 
     let ethIdr = "0", ethPersen = "0"
-    if (ethData) {
-      ethIdr = (parseFloat(ethData.lastPrice) * kursUSD).toFixed(0)
-      ethPersen = parseFloat(ethData.priceChangePercent).toFixed(2)
+    if (ethRaw && ethRaw.lastPrice) {
+      ethIdr = (parseFloat(ethRaw.lastPrice) * kursUSD).toFixed(0)
+      ethPersen = parseFloat(ethRaw.priceChangePercent).toFixed(2)
     }
 
     // 5. Kumpulkan semua data mentah
     const allData: Record<string, any> = {
       ihsg_harga: ihsgHarga,
       ihsg_persen: ihsgPersen,
-      emas_dunia_idr: emasDuniaIdr, // Sudah dalam bentuk Rupiah per gram
+      emas_dunia_idr: emasDuniaIdr,
       kurs_usd_idr: kursUSD.toFixed(0),
       btc_idr: btcIdr,
       btc_persen: btcPersen,
@@ -165,7 +175,6 @@ app.get('/api/finance', async (c) => {
     })
 
   } catch (error: any) {
-    console.error("Finance Error:", error.message)
     return c.json({ status: "error", message: "Gagal memproses data finansial" }, 500)
   }
 })
