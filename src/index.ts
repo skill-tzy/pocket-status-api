@@ -8,20 +8,20 @@ app.get('/', (c) => c.text('PocketStatus API Aggregator is Online!'))
 app.get('/api/cuaca', async (c) => {
   try {
     // 1. Tangkap parameter dinamis dari request ESP32
-    // Default: Kelurahan Kadipiro, Surakarta
     const adm4 = c.req.query('adm4') || "33.72.02.1004" 
     const lat = c.req.query('lat') || "-7.578"
     const lon = c.req.query('lon') || "110.814"
 
-    // 2. Masukkan parameter ke URL tujuan
+    // 2. Setup URL BMKG dan IQAir
     const bmkgUrl = `https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`
     
-    const { IQAIR_API_KEY } = env<{ IQAIR_API_KEY?: string }>(c)
-    // IQAir pakai endpoint 'nearest_city'
-    const iqAirKey = IQAIR_API_KEY || "API_KEY_IQAIR_LU_NANTI"
+    // Pastikan environment tersambung dengan aman
+    const { IQAIR_API_KEY } = env<{ IQAIR_API_KEY: string }>(c)
+    
+    // Endpoint sesuai dokumetasi: /v2/nearest_city
+    const iqAirUrl = `http://api.airvisual.com/v2/nearest_city?lat=${lat}&lon=${lon}&key=${IQAIR_API_KEY}`
 
-const iqAirUrl = `http://api.airvisual.com/v2/nearest_city?lat=${lat}&lon=${lon}&key=${iqAirKey}`
-
+    // Panggil API paralel biar respon Hono lu kencang
     const [bmkgRes, iqAirRes] = await Promise.all([
       fetch(bmkgUrl),
       fetch(iqAirUrl)
@@ -30,28 +30,35 @@ const iqAirUrl = `http://api.airvisual.com/v2/nearest_city?lat=${lat}&lon=${lon}
     const bmkgData = await bmkgRes.json()
     const iqAirData = await iqAirRes.json()
 
-    // 3. Ekstrak data JSON BMKG (Ambil array pertama untuk jam sekarang)
+    // 3. Ekstraksi Data BMKG
     const cuacaSekarang = bmkgData.data[0].cuaca[0][0] 
-    const namaLokasi = bmkgData.lokasi?.desa || bmkgData.lokasi?.kelurahan || bmkgData.lokasi?.kecamatan || "Lokasi Default"
+    const lokasiBmkg = bmkgData.lokasi?.desa || bmkgData.lokasi?.kelurahan || bmkgData.lokasi?.kecamatan || bmkgData.lokasi?.kotakab || "Lokasi Cuaca"
 
-    // 4. Ekstrak AQI dari IQAir
+    // 4. Ekstraksi Data IQAir Sesuai Dokumentasi Resmi
     let aqi = 0
+    let lokasiIqAir = "Tidak diketahui"
+    
     if (iqAirData.status === "success") {
+       // Sesuai dokumen: data.current.pollution.aqius untuk standar Amerika (paling umum dipakai)
        aqi = iqAirData.data.current.pollution.aqius
+       
+       // Sesuai dokumen: data.city, data.state, data.country
+       lokasiIqAir = iqAirData.data.city || iqAirData.data.state || iqAirData.data.country || "Stasiun IQAir"
     }
 
-    // 5. Kirim payload ringkas ke ESP32
+    // 5. Payload Ramping untuk ESP32
     return c.json({
       status: "success",
       data: {
-        lokasi: namaLokasi,                             // String: "Kadipiro"
-        suhu: cuacaSekarang.t,                          // Integer: Suhu dalam Celcius
-        kelembapan: cuacaSekarang.hu,                   // Integer: Kelembapan dalam %
-        kode_cuaca: cuacaSekarang.weather,              // Integer: Kode cuaca (untuk logic icon di ESP32)
-        deskripsi_cuaca: cuacaSekarang.weather_desc,    // String: "Cerah Berawan", "Hujan Sedang", dll
-        kecepatan_angin: cuacaSekarang.ws,              // Integer: Kecepatan angin km/jam
-        arah_angin: cuacaSekarang.wd,                   // String: Arah angin (misal: "Selatan")
-        aqi_iqair: aqi                                  // Integer: Kualitas Udara
+        lokasi_bmkg: lokasiBmkg,
+        lokasi_iqair: lokasiIqAir,
+        suhu: cuacaSekarang.t,
+        kelembapan: cuacaSekarang.hu,
+        kode_cuaca: cuacaSekarang.weather,
+        deskripsi_cuaca: cuacaSekarang.weather_desc,
+        kecepatan_angin: cuacaSekarang.ws,
+        arah_angin: cuacaSekarang.wd,
+        aqi_iqair: aqi
       }
     })
 
