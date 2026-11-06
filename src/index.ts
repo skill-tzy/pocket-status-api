@@ -6,92 +6,167 @@ const app = new Hono()
 app.get('/', (c) => c.text('PocketStatus API Aggregator is Online!'))
 
 app.get('/api/cuaca', async (c) => {
+  // Tangkap parameter 'fields' dari ESP32
+  // Contoh: ?fields=lokasi_bmkg,suhu,deskripsi_cuaca,aqi_iqair
+  const fieldsParam = c.req.query('fields')
+
+  const adm4 = c.req.query('adm4') || "33.72.02.1004" 
+  const lat = c.req.query('lat') || "-7.578"
+  const lon = c.req.query('lon') || "110.814"
+
   try {
-    // 1. Tangkap parameter dinamis dari request ESP32
-    const adm4 = c.req.query('adm4') || "33.72.02.1004" 
-    const lat = c.req.query('lat') || "-7.578"
-    const lon = c.req.query('lon') || "110.814"
-
-    // 2. Setup URL BMKG dan IQAir
-    const bmkgUrl = `https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`
-    
-    // Pastikan environment tersambung dengan aman
     const { IQAIR_API_KEY } = env<{ IQAIR_API_KEY: string }>(c)
-    
-    // Endpoint sesuai dokumetasi: /v2/nearest_city
-    const iqAirUrl = `http://api.airvisual.com/v2/nearest_city?lat=${lat}&lon=${lon}&key=${IQAIR_API_KEY}`
 
-    // Panggil API paralel biar respon Hono lu kencang
+    // Tetap tarik dari kedua sumber sekaligus (paralel)
     const [bmkgRes, iqAirRes] = await Promise.all([
-      fetch(bmkgUrl),
-      fetch(iqAirUrl)
+      fetch(`https://api.bmkg.go.id/publik/prakiraan-cuaca?adm4=${adm4}`),
+      fetch(`http://api.airvisual.com/v2/nearest_city?lat=${lat}&lon=${lon}&key=${IQAIR_API_KEY}`)
     ])
 
     const bmkgData = await bmkgRes.json()
     const iqAirData = await iqAirRes.json()
 
-    // 3. Ekstraksi Data BMKG
     const cuacaSekarang = bmkgData.data[0].cuaca[0][0] 
     const lokasiBmkg = bmkgData.lokasi?.desa || bmkgData.lokasi?.kelurahan || bmkgData.lokasi?.kecamatan || bmkgData.lokasi?.kotakab || "Lokasi Cuaca"
 
-    // 4. Ekstraksi Data IQAir Sesuai Dokumentasi Resmi
     let aqi = 0
     let lokasiIqAir = "Tidak diketahui"
-    
     if (iqAirData.status === "success") {
-       // Sesuai dokumen: data.current.pollution.aqius untuk standar Amerika (paling umum dipakai)
        aqi = iqAirData.data.current.pollution.aqius
-       
-       // Sesuai dokumen: data.city, data.state, data.country
        lokasiIqAir = iqAirData.data.city || iqAirData.data.state || iqAirData.data.country || "Stasiun IQAir"
     }
 
-    // 5. Payload Ramping untuk ESP32
+    // 1. Kumpulkan semua data mentah dalam satu object
+    const allData: Record<string, any> = {
+      lokasi_bmkg: lokasiBmkg,
+      lokasi_iqair: lokasiIqAir,
+      suhu: cuacaSekarang.t,
+      kelembapan: cuacaSekarang.hu,
+      kode_cuaca: cuacaSekarang.weather,
+      deskripsi_cuaca: cuacaSekarang.weather_desc,
+      kecepatan_angin: cuacaSekarang.ws,
+      arah_angin: cuacaSekarang.wd,
+      aqi_iqair: aqi
+    }
+
+    // 2. Saring data jika parameter 'fields' diisi oleh ESP32
+    let finalData = allData
+    if (fieldsParam) {
+      const requestedFields = fieldsParam.split(',') // Pecah string jadi array: ['suhu', 'aqi_iqair', ...]
+      finalData = {} // Kosongkan object
+      
+      requestedFields.forEach(field => {
+        // Pindahkan hanya key yang diminta ke dalam finalData
+        if (allData[field] !== undefined) {
+          finalData[field] = allData[field]
+        }
+      })
+    }
+
+    // 3. Kirim JSON super ramping
     return c.json({
       status: "success",
-      data: {
-        lokasi_bmkg: lokasiBmkg,
-        lokasi_iqair: lokasiIqAir,
-        suhu: cuacaSekarang.t,
-        kelembapan: cuacaSekarang.hu,
-        kode_cuaca: cuacaSekarang.weather,
-        deskripsi_cuaca: cuacaSekarang.weather_desc,
-        kecepatan_angin: cuacaSekarang.ws,
-        arah_angin: cuacaSekarang.wd,
-        aqi_iqair: aqi
-      }
+      data: finalData
     })
 
   } catch (error) {
     console.error(error)
-    return c.json({ status: "error", message: "Gagal ambil cuaca dinamis" }, 500)
+    return c.json({ status: "error", message: "Gagal ambil data cuaca/udara" }, 500)
   }
 })
 
-// 2. Endpoint Keuangan / Finance (Diakses saat ESP32 ada di Template 2)
 app.get('/api/finance', async (c) => {
+  // Tangkap parameter fields (contoh: ?fields=ihsg_harga,btc_idr,emas_dunia_idr)
+  const fieldsParam = c.req.query('fields')
+
   try {
-    const [btcRes, ethRes] = await Promise.all([
-      fetch('https://indodax.com/api/ticker/btc_idr'),
-      fetch('https://indodax.com/api/ticker/eth_idr')
+    const fetchOptions = {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+      }
+    }
+
+    // Tarik semua data dari sumber yang stabil secara paralel
+    const [ihsgRes, goldRes, usdRes, btcRes, ethRes] = await Promise.all([
+      fetch('https://query1.finance.yahoo.com/v8/finance/chart/^JKSE', fetchOptions),  // IHSG
+      fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', fetchOptions),   // Emas Dunia (Troy Ounce)
+      fetch('https://open.er-api.com/v6/latest/USD'),                                  // Kurs API Stabil
+      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),              // Crypto Binance (Anti-blokir)
+      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT')
     ])
 
-    const btcData = await btcRes.json()
-    const ethData = await ethRes.json()
-    const hitungPersen = (last: number, low: number) => (((last - low) / low) * 100).toFixed(2)
+    // Parse JSON dengan pengamanan (fallback kalau ada 1 API yang down)
+    const ihsgData = ihsgRes.ok ? await ihsgRes.json() : null
+    const goldData = goldRes.ok ? await goldRes.json() : null
+    const usdData = usdRes.ok ? await usdRes.json() : null
+    const btcData = btcRes.ok ? await btcRes.json() : null
+    const ethData = ethRes.ok ? await ethRes.json() : null
+
+    // 1. Ekstrak Kurs USD (untuk konversi Crypto & Emas)
+    const kursUSD = usdData ? usdData.rates.IDR : 15500 
+
+    // 2. Ekstrak IHSG
+    let ihsgHarga = "0", ihsgPersen = "0"
+    if (ihsgData && ihsgData.chart.result) {
+      const meta = ihsgData.chart.result[0].meta
+      ihsgHarga = meta.regularMarketPrice.toFixed(0)
+      ihsgPersen = (((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100).toFixed(2)
+    }
+
+    // 3. Ekstrak Emas Dunia & Konversi ke Rupiah/Gram
+    let emasDuniaIdr = "0"
+    if (goldData && goldData.chart.result) {
+      const emasUSD_per_oz = goldData.chart.result[0].meta.regularMarketPrice
+      // Rumus: (Harga USD / 31.1035 gram) * Kurs Rupiah
+      emasDuniaIdr = ((emasUSD_per_oz / 31.1035) * kursUSD).toFixed(0)
+    }
+
+    // 4. Ekstrak Crypto (Binance) & Konversi ke Rupiah
+    let btcIdr = "0", btcPersen = "0"
+    if (btcData) {
+      btcIdr = (parseFloat(btcData.lastPrice) * kursUSD).toFixed(0)
+      btcPersen = parseFloat(btcData.priceChangePercent).toFixed(2)
+    }
+
+    let ethIdr = "0", ethPersen = "0"
+    if (ethData) {
+      ethIdr = (parseFloat(ethData.lastPrice) * kursUSD).toFixed(0)
+      ethPersen = parseFloat(ethData.priceChangePercent).toFixed(2)
+    }
+
+    // 5. Kumpulkan semua data mentah
+    const allData: Record<string, any> = {
+      ihsg_harga: ihsgHarga,
+      ihsg_persen: ihsgPersen,
+      emas_dunia_idr: emasDuniaIdr, // Sudah dalam bentuk Rupiah per gram
+      kurs_usd_idr: kursUSD.toFixed(0),
+      btc_idr: btcIdr,
+      btc_persen: btcPersen,
+      eth_idr: ethIdr,
+      eth_persen: ethPersen
+    }
+
+    // 6. Saring data berdasarkan parameter 'fields' ESP32
+    let finalData = allData
+    if (fieldsParam) {
+      const requestedFields = fieldsParam.split(',')
+      finalData = {} 
+      requestedFields.forEach(field => {
+        if (allData[field] !== undefined) {
+          finalData[field] = allData[field]
+        }
+      })
+    }
 
     return c.json({
       status: "success",
-      data: {
-        emas_antam: "1450000", 
-        crypto: [
-          { pair: "BTC", harga: btcData.ticker.last, persen: hitungPersen(btcData.ticker.last, btcData.ticker.low) },
-          { pair: "ETH", harga: ethData.ticker.last, persen: hitungPersen(ethData.ticker.last, ethData.ticker.low) }
-        ]
-      }
+      data: finalData
     })
-  } catch (error) {
-    return c.json({ status: "error", message: "Gagal ambil data finansial" }, 500)
+
+  } catch (error: any) {
+    console.error("Finance Error:", error.message)
+    return c.json({ status: "error", message: "Gagal memproses data finansial" }, 500)
   }
 })
 
