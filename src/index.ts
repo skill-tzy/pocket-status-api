@@ -179,28 +179,97 @@ app.get('/api/finance', async (c) => {
   }
 })
 
-// 3. Endpoint Jadwal Sholat (Diakses saat ESP32 ada di Template 3)
 app.get('/api/sholat', async (c) => {
+  const fieldsParam = c.req.query('fields')
+  
+  // Tangkap parameter koordinat dari ESP32/Aplikasi
+  // Default fallback: Area Kampus di Kadipiro, Surakarta (Sama seperti BMKG)
+  const lat = c.req.query('lat') || "-7.578"
+  const lon = c.req.query('lon') || "110.814"
+
   try {
-    const aladhanRes = await fetch('https://api.aladhan.com/v1/timingsByCity?city=Surakarta&country=Indonesia&method=11')
-    const data = await aladhanRes.json()
+    // 1. Dapatkan Tanggal & Jam saat ini HANYA di zona waktu WIB
+    const dateWIB = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Jakarta"}))
+    const dd = String(dateWIB.getDate()).padStart(2, '0')
+    const mm = String(dateWIB.getMonth() + 1).padStart(2, '0')
+    const yyyy = dateWIB.getFullYear()
+    const tanggalWIB = `${dd}-${mm}-${yyyy}` 
+
+    // 2. Tembak API Aladhan menggunakan titik koordinat (latitude & longitude)
+    const aladhanUrl = `https://api.aladhan.com/v1/timings/${tanggalWIB}?latitude=${lat}&longitude=${lon}&method=11`
+    
+    const fetchOptions = {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+      }
+    }
+
+    const res = await fetch(aladhanUrl, fetchOptions)
+    if (!res.ok) throw new Error(`Aladhan Error: ${res.status}`)
+    
+    const data = await res.json()
     const jadwal = data.data.timings
     const hijriah = data.data.date.hijri
 
+    // 3. Logika "Otomatis Berganti" ke sholat berikutnya
+    const currentMinutes = dateWIB.getHours() * 60 + dateWIB.getMinutes()
+    const jamSekarang = `${String(dateWIB.getHours()).padStart(2, '0')}:${String(dateWIB.getMinutes()).padStart(2, '0')}`
+
+    const prayerList = [
+      { nama: "Subuh", waktu: jadwal.Fajr },
+      { nama: "Dzuhur", waktu: jadwal.Dhuhr },
+      { nama: "Ashar", waktu: jadwal.Asr },
+      { nama: "Maghrib", waktu: jadwal.Maghrib },
+      { nama: "Isya", waktu: jadwal.Isha }
+    ]
+
+    let sholatBerikutnya = "Subuh" 
+    let jamBerikutnya = jadwal.Fajr
+    
+    for (let prayer of prayerList) {
+      let pMinutes = parseInt(prayer.waktu.substring(0, 2)) * 60 + parseInt(prayer.waktu.substring(3, 5))
+      if (pMinutes > currentMinutes) {
+        sholatBerikutnya = prayer.nama
+        jamBerikutnya = prayer.waktu
+        break
+      }
+    }
+
+    // 4. Kumpulkan data mentah
+    const allData: Record<string, any> = {
+      tanggal_masehi: data.data.date.readable,
+      tanggal_hijriah: `${hijriah.day} ${hijriah.month.en} ${hijriah.year}`,
+      subuh: jadwal.Fajr,
+      dzuhur: jadwal.Dhuhr,
+      ashar: jadwal.Asr,
+      maghrib: jadwal.Maghrib,
+      isya: jadwal.Isha,
+      imsak: jadwal.Imsak,
+      jam_server: jamSekarang,
+      next_sholat: sholatBerikutnya,
+      next_waktu: jamBerikutnya
+    }
+
+    // 5. Saring data berdasarkan parameter 'fields'
+    let finalData = allData
+    if (fieldsParam) {
+      const requestedFields = fieldsParam.split(',')
+      finalData = {} 
+      requestedFields.forEach(field => {
+        if (allData[field] !== undefined) {
+          finalData[field] = allData[field]
+        }
+      })
+    }
+
     return c.json({
       status: "success",
-      data: {
-        tanggal_hijriah: `${hijriah.day} ${hijriah.month.en} ${hijriah.year}`,
-        jadwal: {
-          subuh: jadwal.Fajr,
-          dzuhur: jadwal.Dhuhr,
-          ashar: jadwal.Asr,
-          maghrib: jadwal.Maghrib,
-          isya: jadwal.Isha
-        }
-      }
+      data: finalData
     })
-  } catch (error) {
+
+  } catch (error: any) {
+    console.error("Sholat Error:", error.message)
     return c.json({ status: "error", message: "Gagal ambil jadwal sholat" }, 500)
   }
 })
