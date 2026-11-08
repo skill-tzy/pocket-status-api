@@ -274,20 +274,93 @@ app.get('/api/sholat', async (c) => {
   }
 })
 
-// 4. Endpoint Olahraga (Diakses saat ESP32 ada di Template 4)
-app.get('/api/sports', async (c) => {
+app.get('/api/sport', async (c) => {
+  const league = c.req.query('league') || 'PL'
+  const type = c.req.query('type') || 'klasemen' // Pilihan: 'klasemen' atau 'jadwal'
+  const fieldsParam = c.req.query('fields')
+
   try {
-    // Nanti diganti dengan fetch sungguhan ke football-data.org
+    // API Key dari environment variables Cloudflare
+    const { FOOTBALL_API_KEY } = env<{ FOOTBALL_API_KEY: string }>(c)
+    
+    const fetchOptions = {
+      headers: {
+        "X-Auth-Token": FOOTBALL_API_KEY,
+        "Accept": "application/json"
+      }
+    }
+
+    let responseData: Record<string, any> = { nama_liga: league }
+
+    // A. Tarik Klasemen
+    if (type === 'klasemen') {
+      const res = await fetch(`https://api.football-data.org/v4/competitions/${league}/standings`, fetchOptions)
+      if (!res.ok) throw new Error(`Football API Error: ${res.status}`)
+      
+      const data = await res.json()
+      responseData.nama_liga = data.competition?.name || league
+      
+      if (data.standings && data.standings[0]) {
+        responseData.klasemen_top3 = data.standings[0].table.slice(0, 3).map((item: any) => ({
+          posisi: item.position,
+          klub: item.team.shortName || item.team.name,
+          main: item.playedGames,
+          poin: item.points
+        }))
+      }
+    }
+
+    // B. Tarik Jadwal Pertandingan Berikutnya
+    if (type === 'jadwal') {
+      // Endpoint ini dimodifikasi dengan parameter ?status=SCHEDULED agar hanya mengambil match yang belum main
+      const res = await fetch(`https://api.football-data.org/v4/competitions/${league}/matches?status=SCHEDULED`, fetchOptions)
+      if (!res.ok) throw new Error(`Football API Error: ${res.status}`)
+      
+      const data = await res.json()
+      responseData.nama_liga = data.competition?.name || league
+
+      if (data.matches) {
+        // Ambil maksimal 3 pertandingan terdekat
+        responseData.jadwal_next3 = data.matches.slice(0, 3).map((match: any) => {
+          
+          // Konversi zona waktu UTC ke WIB (Surakarta) dengan format ringkas
+          const dateWIB = new Date(match.utcDate).toLocaleString("id-ID", {
+            timeZone: "Asia/Jakarta",
+            day: "2-digit", 
+            month: "2-digit", 
+            hour: "2-digit", 
+            minute: "2-digit"
+          })
+          
+          return {
+            home: match.homeTeam.shortName || match.homeTeam.name,
+            away: match.awayTeam.shortName || match.awayTeam.name,
+            waktu: dateWIB // Outputnya otomatis ringkas: "10/11 22:00"
+          }
+        })
+      }
+    }
+
+    // C. Eksekusi Field Filtering jika parameter fields dikirim dari ESP32
+    let finalData = responseData
+    if (fieldsParam) {
+      const requestedFields = fieldsParam.split(',')
+      finalData = {}
+      requestedFields.forEach(field => {
+        if (responseData[field] !== undefined) {
+          finalData[field] = responseData[field]
+        }
+      })
+    }
+
     return c.json({
       status: "success",
-      data: {
-        pertandingan: "Real Madrid vs Barcelona",
-        skor_live: "2 - 1",
-        status_match: "Babak 2 (67')"
-      }
+      data: finalData
     })
-  } catch (error) {
-    return c.json({ status: "error", message: "Gagal ambil skor bola" }, 500)
+
+  } catch (error: any) {
+    console.error("Sport Error:", error.message)
+    return c.json({ status: "error", message: "Gagal ambil data olahraga" }, 500)
   }
 })
 
