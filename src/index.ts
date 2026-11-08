@@ -3,6 +3,84 @@ import { env } from 'hono/adapter'
 
 const app = new Hono()
 
+// ==========================================
+// 🛡️ PROTEKSI 1: RATE LIMITER (ANTI DDOS / SPAM IP)
+// ==========================================
+const rateLimitMap = new Map<string, { count: number, resetTime: number }>()
+const WINDOW_MS = 60 * 1000 // Jeda waktu 1 Menit
+const MAX_REQUESTS = 30     // Maksimal 30 request per menit per IP
+
+app.use('*', async (c, next) => {
+  // Ambil IP asli pengirim (Otomatis dari Cloudflare)
+  const ip = c.req.header('cf-connecting-ip') || 'unknown-ip'
+  const now = Date.now()
+  const userRecord = rateLimitMap.get(ip)
+
+  if (userRecord) {
+    if (now > userRecord.resetTime) {
+      // Reset kuota jika sudah lewat 1 menit
+      rateLimitMap.set(ip, { count: 1, resetTime: now + WINDOW_MS })
+    } else {
+      userRecord.count++
+      if (userRecord.count > MAX_REQUESTS) {
+        // Blokir jika melebihi 30 request / menit
+        c.header('Retry-After', '60')
+        return c.json({ 
+          status: "error", 
+          message: "Too Many Requests. Santai bro, tunggu 1 menit lagi." 
+        }, 429)
+      }
+    }
+  } else {
+    // Daftarkan IP baru
+    rateLimitMap.set(ip, { count: 1, resetTime: now + WINDOW_MS })
+  }
+
+  // Pembersihan RAM: Hapus IP yang sudah expired dari map
+  if (rateLimitMap.size > 500) {
+    for (const [key, val] of rateLimitMap.entries()) {
+      if (now > val.resetTime) rateLimitMap.delete(key)
+    }
+  }
+
+  await next()
+})
+
+// ==========================================
+// 🛡️ PROTEKSI 2: CACHE MEMORY (ANTI JEBOL API LUAR)
+// ==========================================
+const cacheMemory = new Map<string, { data: any, expiredAt: number }>()
+const CACHE_DURATION_MS = 30 * 1000
+
+app.use('/api/*', async (c, next) => {
+  const url = c.req.url
+  const now = Date.now()
+  const cached = cacheMemory.get(url)
+
+  if (cached && cached.expiredAt > now) {
+    c.header('X-Cache-Status', 'HIT')
+    return c.json(cached.data)
+  }
+
+  await next()
+
+  if (c.res.ok) {
+    const resClone = c.res.clone()
+    try {
+      const data = await resClone.json()
+      cacheMemory.set(url, { data, expiredAt: now + CACHE_DURATION_MS })
+      
+      if (cacheMemory.size > 100) {
+        for (const [key, value] of cacheMemory.entries()) {
+          if (value.expiredAt < now) cacheMemory.delete(key)
+        }
+      }
+      c.header('X-Cache-Status', 'MISS')
+    } catch (e) { }
+  }
+})
+// ==========================================
+
 app.get('/', (c) => c.text('PocketStatus API Aggregator is Online!'))
 
 app.get('/api/cuaca', async (c) => {
